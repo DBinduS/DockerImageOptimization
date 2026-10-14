@@ -65,9 +65,89 @@ Why multi-stage?
 - Final image contains only nginx + static assets — smaller and more secure
 - Faster deployment and lower storage/transfer costs
 
-Recommended next steps
 
-- Add your site source under `src/` and set the correct build command in the Dockerfile
-- Pin the `node` and `nginx` image tags you use for reproducible builds (e.g., `node:20-alpine`, `nginx:1.25.2-alpine`)
-- Keep `.dockerignore` trimmed to reduce build context
+## Compare image sizes: single-stage vs multi-stage
 
+The best way to validate optimization is to build a "normal" (single-stage) image and a multi-stage (optimized) image, then compare their sizes and layer contents.
+
+1. Create a simple single-stage Dockerfile (Dockerfile.single) that copies source/build output directly into nginx. Example:
+
+```dockerfile
+# Dockerfile.single
+FROM node:20-alpine AS build
+WORKDIR /src
+COPY package.json package-lock.json ./
+RUN npm ci --silent
+COPY . ./
+RUN npm run build
+
+FROM nginx:1.25.2-alpine
+COPY /src/dist/ /usr/share/nginx/html/
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+```
+
+Note: This single-stage example still uses two FROM lines but does not separate the build and runtime in the same way — depending on your Dockerfile this may include extra artifacts.
+
+2. Build both images:
+
+```bash
+# Build single-stage (using Dockerfile.single)
+docker build -f Dockerfile.single -t static-single:latest .
+
+# Build multi-stage (using Dockerfile)
+docker build -t static-multi:latest .
+```
+
+3. Quick size comparison (human-readable):
+
+```bash
+docker images --format "{{.Repository}}:{{.Tag}}\t{{.Size}}" static-single:latest static-multi:latest
+```
+
+4. Precise size in bytes (scriptable):
+
+```bash
+# Print image size in bytes and convert to human-readable
+echo "Single-stage: $(docker image inspect --format='{{.Size}}' static-single:latest) bytes"
+echo "Multi-stage: $(docker image inspect --format='{{.Size}}' static-multi:latest) bytes"
+
+# Optionally convert to human-readable with numfmt (Linux/macOS with coreutils)
+numfmt --to=iec-i --suffix=B $(docker image inspect --format='{{.Size}}' static-single:latest)
+numfmt --to=iec-i --suffix=B $(docker image inspect --format='{{.Size}}' static-multi:latest)
+```
+
+5. Inspect layer-by-layer differences:
+
+- Use `docker history` to see per-layer sizes
+
+```bash
+docker history --no-trunc static-single:latest
+docker history --no-trunc static-multi:latest
+```
+
+- Use `dive` to visualize layer contents and identify large files (recommended):
+
+```bash
+dive static-single:latest
+dive static-multi:latest
+```
+
+6. Interpret results
+
+- The multi-stage image should be smaller because it doesn't include build tools, dependency caches, or intermediate artifacts.
+- `docker history` and `dive` will show which layers and files contribute most to size — focus optimization on those (e.g., removing node_modules from final image, cleaning caches, copying only dist).
+
+7. Clean up
+
+```bash
+docker rmi static-single:latest static-multi:latest
+```
+
+Tips
+
+- For repeatable comparisons pin image tags (e.g., `node:20-alpine`, `nginx:1.25.2-alpine`).
+- If you use BuildKit, the build behavior can differ slightly; use the same build flags for both images when comparing (e.g., `DOCKER_BUILDKIT=1 docker build ...`).
+- When measuring in CI, prefer `docker image inspect` for stable byte counts.
+
+Recommended next step: run the two builds with your actual site sources and compare the outputs. The commands above let you quantify the size savings and identify which layers to optimize further.
